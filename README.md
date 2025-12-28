@@ -9,3 +9,22 @@ This is our semester project for the _Embedded systems and robotics_ course at E
 1. Download the course-specific compiled VSCode version
 2. Build the project using `make` command
 3. Run the executable
+
+## 🗃️ Project structure
+
+```
+.
+├── src
+│   ├── chconf.h
+│   ├── detection.c          # Wall detection
+│   ├── detection.h
+│   ├── halconf.h
+│   ├── main.c               # Process loop
+│   ├── main.h
+│   ├── makefile
+│   ├── mcuconf.h
+│   ├── travel.c             # Accelerometer and travelling
+│   └── travel.h
+├── .gitignore
+└── README.md
+```
