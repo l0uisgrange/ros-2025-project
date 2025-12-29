@@ -1,19 +1,27 @@
-#ifndef PI_REGULATOR_H
-#define PI_REGULATOR_H
+#ifndef TRAVEL_H
+#define TRAVEL_H
 
-// Constants related to the PI regulator
-#define ROTATION_THRESHOLD		10
-#define ROTATION_COEFF			2 
-#define ERROR_THRESHOLD			0.1f	//[cm] because of the noise of the camera
-#define KP						800.0f
-#define KI 						3.5f	//must not be zero
-#define MAX_SUM_ERROR 			(MOTOR_SPEED_LIMIT/KI)
+#define GOAL_TILT_Y           	0.0f
+#define TILT_KP              	500.0f 	// Proportional gain for Y-tilt
+#define TILT_KI               	1.0f   	// Integral gain for Y-tilt
+#define TILT_ERROR_THRESHOLD 	0.5f 
+#define TILT_MAX_SUM_ERROR    	50.0f  	// Anti-windup limit
 
-//start the PI regulator thread
-void pi_regulator_start(void);
+#define GOAL_TILT_X             0.0f
+#define ROTATION_TILT_THRESHOLD 0.8f
+#define ROTATION_TILT_COEFF     70.0f   // Proportional gain for rotation speed correction
 
-//handle motors
+#define AVERAGING_SIZE 30
+
+void travel_thread_start(void);
+
 void set_enabled_motors(bool enable);
-void toogle_enabled_motors(void);
+void toggle_enabled_motors(void);
 
-#endif /* PI_REGULATOR_H */
+void set_speed(int16_t left, int16_t right);
+void set_pos(int16_t left, int16_t right);
+float get_imu_average(void);
+void add_imu_average(float value);
+void reset_imu_averaging(void);
+
+#endif
