@@ -1,96 +1,141 @@
 #include <ch.h>
+#include <chprintf.h>
 #include <hal.h>
 #include <math.h>
-#include <usbcfg.h>
-#include <chprintf.h>
 #include <motors.h>
-#include <stdlib.h>
+#include <sensors/imu.h>
+#include <usbcfg.h>
 
-#include "pi_regulator.h"
-#include "process_image.h"
+#include "detection.h"
+#include "main.h"
+#include "travel.h"
 
 static bool enabled_motors = false;
+static float tilt_sum_error = 0;
+static float tilt_y_history[AVERAGING_SIZE];
+static uint8_t history_index = 0;
 
-//simple PI regulator implementation
-int16_t pi_regulator(float distance, float goal){
+void reset_imu_averaging(void) {
+    for (int8_t i = 0; i < AVERAGING_SIZE; i++) {
+        tilt_y_history[i] = 0;
+    }
+    history_index = 0;
+}
 
-	float error = 0;
-	float speed = 0;
+void set_speed(int16_t left, int16_t right) {
+    left_motor_set_speed(left);
+    right_motor_set_speed(right);
+}
 
-	static float sum_error = 0;
+void set_pos(int16_t left, int16_t right) {
+    left_motor_set_pos(left);
+    right_motor_set_pos(right);
+}
 
-	error = distance - goal;
+void add_imu_average(float value) {
+    tilt_y_history[history_index] = value;
 
-	//disables the PI regulator if the error is to small
-	//this avoids to always move as we cannot exactly be where we want and 
-	//the camera is a bit noisy
-	if(fabs(error) < ERROR_THRESHOLD){
-		return 0;
-	}
+    if (history_index < AVERAGING_SIZE) {
+        history_index++;
+    } else {
+        history_index = 0;
+    }
+}
 
-	sum_error += error;
+float get_imu_average() {
+    float sum = 0;
 
-	//we set a maximum and a minimum for the sum to avoid an uncontrolled growth
-	if(sum_error > MAX_SUM_ERROR){
-		sum_error = MAX_SUM_ERROR;
-	}else if(sum_error < -MAX_SUM_ERROR){
-		sum_error = -MAX_SUM_ERROR;
-	}
+    for (uint8_t i = 0; i < AVERAGING_SIZE; i++) {
+        sum += tilt_y_history[i];
+    }
+    return sum / AVERAGING_SIZE;
+}
 
-	speed = KP * error + KI * sum_error;
+int16_t pi_regulator(float current_tilt, float goal_tilt) {
+    float error = 0;
+    float speed = 0;
+
+    error = current_tilt - goal_tilt;
+
+    if (fabs(error) < TILT_ERROR_THRESHOLD) {
+        return 0;
+    }
+
+    tilt_sum_error += error;
+
+    // Anti-windup
+    if (tilt_sum_error > TILT_MAX_SUM_ERROR) {
+        tilt_sum_error = TILT_MAX_SUM_ERROR;
+    } else if (tilt_sum_error < -TILT_MAX_SUM_ERROR) {
+        tilt_sum_error = -TILT_MAX_SUM_ERROR;
+    }
+
+    speed = TILT_KP * error + TILT_KI * tilt_sum_error;
 
     return (int16_t)speed;
 }
 
-static THD_WORKING_AREA(waPiRegulator, 256);
-static THD_FUNCTION(PiRegulator, arg) {
-
+static THD_WORKING_AREA(waTravelThead, 256);
+static THD_FUNCTION(TravelThread, arg) {
     chRegSetThreadName(__FUNCTION__);
     (void)arg;
 
     systime_t time;
 
     int16_t speed = 0;
-    int16_t speed_correction = 0;
+    float speed_correction = 0;
 
-    while(1){
+    float current_tilt_y = 0;
+    float current_tilt_x = 0;
+
+    while (true) {
         time = chVTGetSystemTime();
-        
-        //computes the speed to give to the motors
-        //distance_cm is modified by the image processing thread
-        speed = pi_regulator(get_distance_cm(), GOAL_DISTANCE);
-        //computes a correction factor to let the robot rotate to be in front of the line
-        speed_correction = (get_line_position() - (IMAGE_BUFFER_SIZE/2));
 
-        //if the line is nearly in front of the camera, don't rotate
-        if(abs(speed_correction) < ROTATION_THRESHOLD){
-        	speed_correction = 0;
+        if (in_bounce_procedure() && !achieved_bounce_distance()) {
+            set_speed(-800, -800);
+        } else if (in_turn_procedure() && !achieved_turn_distance()) {
+            set_speed(800, -800);
+        } else {
+            // === Forward/Backward Control ===
+
+            current_tilt_y = get_acceleration(Y_AXIS);
+
+            // IMU values smoothing
+            add_imu_average(current_tilt_y);
+            float average_tilt_y = get_imu_average();
+            speed = pi_regulator(average_tilt_y, GOAL_TILT_Y);
+
+            // === Rotation Control ===
+
+            current_tilt_x = get_acceleration(X_AXIS);
+
+            if (fabs(current_tilt_x - GOAL_TILT_X) > ROTATION_TILT_THRESHOLD) {
+                speed_correction = ROTATION_TILT_COEFF * (current_tilt_x - GOAL_TILT_X);
+            } else {
+                speed_correction = 0;
+            }
+
+            if (enabled_motors) {
+                set_speed(speed + (int16_t)speed_correction, speed - (int16_t)speed_correction);
+            } else {
+                set_speed(0, 0);
+            }
         }
 
-		if (enabled_motors){
-			//applies the speed from the PI regulator and the correction for the rotation
-			right_motor_set_speed(speed - ROTATION_COEFF * speed_correction);
-			left_motor_set_speed(speed + ROTATION_COEFF * speed_correction);
-		}
-		else {
-			//stop the motors
-			right_motor_set_speed(0);
-			left_motor_set_speed(0);
-		}
-
-        //100Hz
         chThdSleepUntilWindowed(time, time + MS2ST(10));
     }
 }
 
-void pi_regulator_start(void) {
-	chThdCreateStatic(waPiRegulator, sizeof(waPiRegulator), NORMALPRIO, PiRegulator, NULL);
+void travel_thread_start(void) {
+    tilt_sum_error = 0;
+    chThdCreateStatic(waTravelThead, sizeof(waTravelThead), NORMALPRIO, TravelThread, NULL);
 }
 
 void set_enabled_motors(bool enable) {
-	enabled_motors = enable;
+    enabled_motors = enable;
+    if (!enable) {
+        set_speed(0, 0);
+    }
 }
 
-void toogle_enabled_motors() {
-	enabled_motors = !enabled_motors;
-}
+void toggle_enabled_motors() { set_enabled_motors(!enabled_motors); }
